@@ -1,0 +1,12 @@
+{
+    "model_version": "resnet18_distill",
+    "augmentation": "yes",
+    "teacher": "densenet161",
+    "alpha": 0.95,
+    "temperature": 6,
+    "learning_rate": 1e-1,
+    "batch_size": 256,
+    "num_epochs": 20,
+    "save_summary_steps": 50,
+    "num_workers": 0
+}
