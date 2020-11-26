@@ -2,6 +2,11 @@
 
 **Still very much work in progress**
 
+TODO:
+- [ ] convert to object detection using yolov4
+- [ ] mlflow/tensorboard to visualize training progress
+- [ ] database for easy retrieval of wanted images
+
 ## Features
 
 * Hyperparameters defined by "params.json"
