@@ -3,13 +3,14 @@ Helper functions referernce from:
 https://github.com/cs230-stanford/cs230-stanford.github.io
 """
 
-import os
 import re
 import json
 import torch
 import shutil
 import logging
 import numpy as np
+from pathlib import Path
+from model.params import Cfg
 
 
 class Params():
@@ -24,6 +25,7 @@ class Params():
     """
 
     def __init__(self, json_path):
+        self.__dict__.update(Cfg)
         with open(json_path) as f:
             params = json.load(f)
             self.__dict__.update(params)
@@ -118,15 +120,12 @@ def save_checkpoint(state, is_best, checkpoint):
         is_best: (bool) True if it is the best model seen till now
         checkpoint: (string) folder where parameters are to be saved
     """
-    filepath = os.path.join(checkpoint, 'last.pth.tar')
-    if not os.path.exists(checkpoint):
-        print("Checkpoint Directory does not exist! Making directory {}".format(checkpoint))
-        os.mkdir(checkpoint)
-    # else:
-    #     print("Checkpoint Directory exists! ")
-    torch.save(state, filepath)
+    checkpoint = Path(checkpoint)
+    filepath = checkpoint / 'last.pth.tar'
+    checkpoint.mkdir(parents=True, exist_ok=True)
+    torch.save(state, str(filepath))
     if is_best:
-        shutil.copyfile(filepath, os.path.join(checkpoint, 'best.pth.tar'))
+        shutil.copyfile(str(filepath), checkpoint / 'best.pth.tar')
 
 
 def load_checkpoint(checkpoint, model, optimizer=None):
@@ -134,43 +133,64 @@ def load_checkpoint(checkpoint, model, optimizer=None):
     optimizer assuming it is present in checkpoint.
 
     Args:
-        checkpoint: (string) filename which needs to be loaded
+        checkpoint: (Path) filename which needs to be loaded
         model: (torch.nn.Module) model for which the parameters are loaded
         optimizer: (torch.optim) optional: resume optimizer from checkpoint
     """
-    if not os.path.exists(checkpoint):
-        raise("File doesn't exist {}".format(checkpoint))
+    suffix = ''.join(checkpoint.suffixes)
+    assert suffix in ['.pth', '.pth.tar'], "make sure this is a pytorch checkpoint!"
+
+    if not checkpoint.exists():
+        raise("File doesn't exist {}".format(str(checkpoint)))
     if torch.cuda.is_available():
-        checkpoint = torch.load(checkpoint)
+        checkpoint = torch.load(str(checkpoint))
     else:
         # this helps avoid errors when loading single-GPU-trained weights onto CPU-model
-        checkpoint = torch.load(checkpoint, map_location=lambda storage, loc: storage)
+        checkpoint = torch.load(str(checkpoint), map_location=torch.device('cpu'))
 
     model.load_state_dict(checkpoint['state_dict'])
 
-    if optimizer:
+    if optimizer and checkpoint.get('optim_dict'):
         optimizer.load_state_dict(checkpoint['optim_dict'])
 
-    return checkpoint
+    return
+
+
+def load_darknet_checkpoint(checkpoint, model):
+    """Loads model parameters (state_dict) from file_path.
+
+    Args:
+        checkpoint: (Path) filename which needs to be loaded
+        model: (Darknet) model for which the parameters are loaded
+    """
+    suffix = ''.join(checkpoint.suffixes)
+    assert suffix in ['.weights'], "make sure this is a Darknet checkpoint!"
+
+    if not checkpoint.exists():
+        raise("File doesn't exist {}".format(str(checkpoint)))
+
+    model.load_weights(str(checkpoint))
+
+    return
 
 
 # use this when loading from pretrained pytorch weights downloaded from official url
-def save_pytorch_pretrained(checkpoint, model, name='densenet161'):
-    if not os.path.exists(checkpoint):
-        raise("File doesn't exist {}".format(checkpoint))
-    if torch.cuda.is_available():
-        checkpoint = torch.load(checkpoint)
-    else:
-        # this helps avoid errors when loading single-GPU-trained weights onto CPU-model
-        checkpoint = torch.load(checkpoint, map_location=lambda storage, loc: storage)
+# def save_pytorch_pretrained(checkpoint, model, name='densenet161'):
+#     if not Path(checkpoint).exists():
+#         raise("File doesn't exist {}".format(checkpoint))
+#     if torch.cuda.is_available():
+#         checkpoint = torch.load(checkpoint)
+#     else:
+#         # this helps avoid errors when loading single-GPU-trained weights onto CPU-model
+#         checkpoint = torch.load(checkpoint, map_location=lambda storage, loc: storage)
 
-    # '.'s are no longer allowed in module names, but previous _DenseLayer has keys 'norm.1', 'relu.1', 'conv.1', 'norm.2', 'relu.2', 'conv.2'. They are also in the checkpoints in model_urls. This pattern is used to find such keys.
-    pattern = re.compile(r'^(.*denselayer\d+\.(?:norm|relu|conv))\.((?:[12])\.(?:weight|bias|running_mean|running_var))$')
-    for key in list(checkpoint.keys()):
-        res = pattern.match(key)
-        if res:
-            new_key = res.group(1) + res.group(2)
-            checkpoint[new_key] = checkpoint[key]
-            del checkpoint[key]
-    model.load_state_dict(checkpoint)
-    torch.save({'state_dict': model.state_dict()}, f'experiments/base_{name}/pretrained.pth.tar')
+#     # '.'s are no longer allowed in module names, but previous _DenseLayer has keys 'norm.1', 'relu.1', 'conv.1', 'norm.2', 'relu.2', 'conv.2'. They are also in the checkpoints in model_urls. This pattern is used to find such keys.
+#     pattern = re.compile(r'^(.*denselayer\d+\.(?:norm|relu|conv))\.((?:[12])\.(?:weight|bias|running_mean|running_var))$')
+#     for key in list(checkpoint.keys()):
+#         res = pattern.match(key)
+#         if res:
+#             new_key = res.group(1) + res.group(2)
+#             checkpoint[new_key] = checkpoint[key]
+#             del checkpoint[key]
+#     model.load_state_dict(checkpoint)
+#     torch.save({'state_dict': model.state_dict()}, f'experiments/base_{name}/pretrained.pth.tar')

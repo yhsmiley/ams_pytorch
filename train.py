@@ -1,25 +1,24 @@
-import os
 import torch
 import random
 import logging
 import numpy as np
 from tqdm import tqdm
+from pathlib import Path
 from torch.autograd import Variable
-from torch.optim.lr_scheduler import StepLR
+from torch.optim.lr_scheduler import LambdaLR
 
-import utils
+from tools import utils
 from evaluate import evaluate_kd
 
 
-def train_kd(model, optimizer, loss_fn, dataloader, metrics, params):
+def train_kd(model, optimizer, loss_fn, dataloader, params):
     """Train the model on `num_steps` batches
 
     Args:
         model: (torch.nn.Module) the neural network
         optimizer: (torch.optim) optimizer for parameters of model
         loss_fn: 
-        dataloader: 
-        metrics: (dict) 
+        dataloader:
         params: (Params) hyperparameters
     """
 
@@ -33,36 +32,34 @@ def train_kd(model, optimizer, loss_fn, dataloader, metrics, params):
     # Use tqdm for progress bar
     with tqdm(total=len(dataloader)) as t:
         for i, (train_batch, labels_batch) in enumerate(dataloader):
-            # move to GPU if available
-            if params.cuda:
-                train_batch = train_batch.cuda(non_blocking=True)
-                labels_batch = labels_batch.cuda(non_blocking=True)
-            # convert to torch Variables
-            train_batch = Variable(train_batch)
-            labels_batch = Variable(labels_batch)
+            # move to GPU
+            train_batch = train_batch.cuda(non_blocking=True)
+            labels_batch = labels_batch.cuda(non_blocking=True)
 
             # compute model output, compute loss
             output_batch = model(train_batch)
 
-            loss = loss_fn(output_batch, labels_batch)
+            loss, loss_xy, loss_wh, loss_obj, loss_cls, loss_l2 = loss_fn(output_batch, labels_batch)
 
-            # clear previous gradients, compute gradients of all variables wrt loss
-            optimizer.zero_grad()
+            # compute gradients of all variables wrt loss
             loss.backward()
 
-            # performs updates using calculated gradients
-            optimizer.step()
+            # after going through 1 batch size of images
+            if (i+1) % params.subdivisions == 0:
+                # performs updates using accumulated gradients
+                optimizer.step()
+                # clear previous gradients
+                optimizer.zero_grad()
 
-            # Evaluate summaries only once in a while
-            if i % params.save_summary_steps == 0:
-                # extract data from torch Variable, move to cpu, convert to numpy arrays
-                output_batch = output_batch.data.cpu().numpy()
-                labels_batch = labels_batch.data.cpu().numpy()
-
-                # compute all metrics on this batch
-                summary_batch = {metric:metrics[metric](output_batch, labels_batch) for metric in metrics}
-                summary_batch['loss'] = loss.data.item()
-                summ.append(summary_batch)
+            # compute all metrics on this batch
+            summary_batch = {}
+            summary_batch['loss'] = loss.data.item()
+            summary_batch['loss_xy'] = loss_xy.data.item()
+            summary_batch['loss_wh'] = loss_wh.data.item()
+            summary_batch['loss_obj'] = loss_obj.data.item()
+            summary_batch['loss_cls'] = loss_cls.data.item()
+            summary_batch['loss_l2'] = loss_l2.data.item()
+            summ.append(summary_batch)
 
             # update the average loss
             loss_avg.update(loss.data.item())
@@ -76,26 +73,33 @@ def train_kd(model, optimizer, loss_fn, dataloader, metrics, params):
     logging.info("- Train metrics: " + metrics_string)
 
 
-def train_and_evaluate_kd(model, train_dataloader, val_dataloader, optimizer, loss_fn, metrics, params, model_dir, restore_file=None):
+def train_and_evaluate_kd(model, train_dataloader, val_dataloader, optimizer, loss_fn, params, model_dir):
     """Train the model and evaluate every epoch.
 
     Args:
         model: (torch.nn.Module) the neural network
         params: (Params) hyperparameters
         model_dir: (string) directory containing config, weights and log
-        restore_file: (string) - file to restore (without its extension .pth.tar)
     """
-    # reload weights from restore_file if specified
-    if restore_file is not None:
-        restore_path = os.path.join(model_dir, restore_file)
-        logging.info("Restoring parameters from {}".format(restore_path))
-        utils.load_checkpoint(restore_path, model, optimizer)
+
+    # learning rate setup
+    def burnin_schedule(i):
+        factor = 1.0
+
+        if i < params.burn_in:
+            factor = pow(i / params.burn_in, 4)
+        # elif i < params.steps[0]:
+        #     factor = 1.0
+        # else:
+        #     factor = 1.0
+        #     max_idx = max_idx = params.steps.index(max(step for step in params.steps if step <= i))
+        #     for scale in params.scales[:max_idx+1]:
+        #         factor *= scale
+        return factor
 
     best_val_acc = 0.0
 
-    # learning rate schedulers:
-    if params.model_version == "resnet18_distill":
-        scheduler = StepLR(optimizer, step_size=50, gamma=0.1, verbose=True)
+    scheduler = LambdaLR(optimizer, burnin_schedule)
 
     for epoch in range(params.num_epochs):
 
@@ -103,15 +107,16 @@ def train_and_evaluate_kd(model, train_dataloader, val_dataloader, optimizer, lo
         logging.info("Epoch {}/{}".format(epoch + 1, params.num_epochs))
 
         # compute number of batches in one epoch (one full pass over the training set)
-        train_kd(model, optimizer, loss_fn, train_dataloader, metrics, params)
+        train_kd(model, optimizer, loss_fn, train_dataloader, params)
 
+        # No need to validate in real ams, just overfit to training set
         # Evaluate for one epoch on validation set
-        val_metrics = evaluate_kd(model, loss_fn, val_dataloader, metrics, params)
+        val_metrics = evaluate_kd(model, loss_fn, val_dataloader, params)
 
         scheduler.step()
 
-        val_acc = val_metrics['accuracy']
-        is_best = val_acc>=best_val_acc
+        val_acc = val_metrics['AP']
+        is_best = val_acc >= best_val_acc
 
         # Save weights
         utils.save_checkpoint({'epoch': epoch + 1,
@@ -122,70 +127,89 @@ def train_and_evaluate_kd(model, train_dataloader, val_dataloader, optimizer, lo
 
         # If best_eval, best_save_path
         if is_best:
-            logging.info("- Found new best accuracy")
+            logging.info("- Found new highest AP")
             best_val_acc = val_acc
 
             # Save best val metrics in a json file in the model directory
-            best_json_path = os.path.join(model_dir, "metrics_val_best_weights.json")
-            utils.save_dict_to_json(val_metrics, best_json_path)
+            best_json_path = model_dir / "metrics_val_best.json"
+            utils.save_dict_to_json(val_metrics, str(best_json_path))
 
         # Save latest val metrics in a json file in the model directory
-        last_json_path = os.path.join(model_dir, "metrics_val_last_weights.json")
-        utils.save_dict_to_json(val_metrics, last_json_path)
+        last_json_path = model_dir / "metrics_val_last.json"
+        utils.save_dict_to_json(val_metrics, str(last_json_path))
 
 
 if __name__ == '__main__':
     import argparse
-    import torch.nn as nn
-    import torch.optim as optim
-    import torchvision.models as models
-    import model.data_loader as data_loader
-    from model.metrics import metrics
+    from torch import nn, optim
+    from datetime import datetime
+    from torchvision import models
+    from model.loss import Yolo_loss
+    from model.darknet2pytorch import Darknet
+    from model.data_loader import fetch_dataloader
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model_dir', default='experiments/resnet18_distill/densenet161_teacher', help="Directory containing params.json")
-    parser.add_argument('--restore_file', default=None, help="Optional, name of the file in model_dir containing weights to reload before training")
+    parser.add_argument('--model_dir', type=Path, default='experiments/yolov4_tiny_distill/yolov4_teacher', help="Directory containing params.json")
+    parser.add_argument('--restore_file', type=Path, default='yolov4-tiny.pth.tar', help="Optional, name of the file in model_dir containing student weights to reload before training")
 
-    # Load the parameters from json file
     args = parser.parse_args()
-    json_path = os.path.join(args.model_dir, 'params.json')
-    assert os.path.isfile(json_path), "No json configuration file found at {}".format(json_path)
-    params = utils.Params(json_path)
+    model_dir = args.model_dir
+
+    # Update default params with loaded parameters from json file
+    json_path = model_dir / 'params.json'
+    assert json_path.is_file(), "No json configuration file found at {}".format(str(json_path))
+    params = utils.Params(str(json_path))
 
     # use GPU if available
     params.cuda = torch.cuda.is_available()
+    params.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     # Set the random seed for reproducible experiments
-    random.seed(230)
-    torch.manual_seed(230)
-    if params.cuda: torch.cuda.manual_seed(230)
+    seed = 230
+    random.seed(seed)
+    torch.manual_seed(seed)
+    if params.cuda: torch.cuda.manual_seed(seed)
+
+    #  enable cudnn autotuner
+    torch.backends.cudnn.benchmark = True
 
     # Set the logger
-    utils.set_logger(os.path.join(args.model_dir, 'train.log'))
+    train_logs_dir = model_dir / 'train_logs'
+    train_logs_dir.mkdir(exist_ok=True)
+    now = datetime.now().strftime("%Y_%m_%d_%H-%M-%S")
+    utils.set_logger(str(train_logs_dir / f'train_{now}.log'))
 
-    # train a 18-layer ResNet with knowledge distillation
-    if params.model_version == 'resnet18_distill':
-        model = models.resnet18().cuda() if params.cuda else models.resnet18()
-        optimizer = optim.SGD(model.parameters(), lr=params.learning_rate, momentum=0.9, weight_decay=5e-4)
-        loss_fn = nn.CrossEntropyLoss()
+    # train a yolov4 tiny with knowledge distillation
+    if params.model_version == 'yolov4_tiny_distill':
+        cfgfile = str(model_dir / 'yolov4-tiny.cfg')
+        student_model = Darknet(cfgfile).cuda()
+        optimizer = optim.Adam(student_model.parameters(), lr=params.learning_rate/params.batch_size, betas=(0.9, 0.999), eps=1e-08)
+        loss_fn = Yolo_loss(n_classes=params.num_classes, device=params.device, batch=params.batch_size // params.subdivisions, image_size=params.width, which_yolo='yolov4-tiny')
 
     # Specify the pre-trained teacher models for knowledge distillation
-    if params.teacher == "densenet161":
-        teacher_model = models.densenet161().cuda()
-        teacher_checkpoint = 'experiments/base_densenet161/pretrained.pth.tar'
+    if params.teacher == "yolov4":
+        cfgfile = str(model_dir / 'yolov4.cfg')
+        teacher_model = Darknet(cfgfile).cuda()
+        teacher_checkpoint = model_dir / 'yolov4.pth.tar'
 
-    elif params.teacher == "resnext50":
-        teacher_model = models.resnext50_32x4d().cuda()
-        teacher_checkpoint = 'experiments/base_resnext50/pretrained.pth.tar'
+    # reload student weights from restore_file if specified
+    if args.restore_file is not None:
+        restore_path = model_dir / args.restore_file
+        logging.info("Restoring parameters from {}".format(str(restore_path)))
+        utils.load_checkpoint(restore_path, student_model, optimizer)
 
+    # reload teacher weights
     utils.load_checkpoint(teacher_checkpoint, teacher_model)
+
+    # Log down parameters used
+    logging.info("Parameters: " + str(params.dict))
 
     # Create the input data pipeline
     logging.info("Loading the datasets...")
-    train_dl, dev_dl = data_loader.fetch_dataloader(params, teacher_model)
+    train_dl, dev_dl = fetch_dataloader(params, teacher_model)
     logging.info("- done.")
 
-    # Train the model with KD
+    # Train the student model with KD
     logging.info("Experiment - model version: {}".format(params.model_version))
     logging.info("Starting training for {} epoch(s)".format(params.num_epochs))
-    train_and_evaluate_kd(model, train_dl, dev_dl, optimizer, loss_fn, metrics, params, args.model_dir, args.restore_file)
+    train_and_evaluate_kd(student_model, train_dl, dev_dl, optimizer, loss_fn, params, model_dir)

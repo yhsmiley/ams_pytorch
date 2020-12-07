@@ -133,6 +133,7 @@ dmypy.json
 # model weights
 *.pth
 *.pth.tar
+*.weights
 
 # image folders
 data-imagenet/

@@ -56,7 +56,11 @@ RUN rm -rf /var/cache/apt/archives/
 ENV TZ=Asia/Singapore
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
-RUN pip3 install --no-cache-dir --upgrade pip
+RUN python3 -m pip install --no-cache-dir --upgrade pip
 
 COPY requirements.txt requirements.txt
-RUN pip3 install --no-cache-dir --use-feature=2020-resolver -r requirements.txt
+RUN pip3 install --no-cache-dir -r requirements.txt
+
+# INSTALL PYCOCOTOOLS
+RUN pip3 install --no-cache-dir cython==0.29.21
+RUN pip3 install --no-cache-dir 'git+https://github.com/cocodataset/cocoapi.git#subdirectory=PythonAPI'
