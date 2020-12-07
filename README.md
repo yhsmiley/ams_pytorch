@@ -10,8 +10,8 @@ TODO:
 ## Features
 
 * Hyperparameters defined by "params.json"
-* Progress bar, checkpoint saving/loading (utils.py)
-* Pretrained teacher models available for download 
+* Progress bar, checkpoint saving/loading (tools/utils.py)
+* Pretrained Yolov4 models available for download
 
 
 ## Install
@@ -26,25 +26,14 @@ TODO:
 
 * train.py: main entrance for train/eval
 * experiments/: json files for each experiment
-* model/: teacher and student DNNs, dataloader 
+* model/: teacher and student networks, dataloader 
 
 
 ## Key notes about usage for your experiments:
 
-* Download pretrained teacher model checkpoints from [here](https://pytorch.org/docs/stable/torchvision/models.html) and extract into experiments folder
-* Download some sample imagenet data and extract into data-imagenet folder (separate train and test subfolders).
-* Call train.py to start training ResNet18 with state-of-the-art deeper models distilled
+* Download some sample imagenet data (make sure these classes also exist in coco) and extract into data-imagenet folder (separate train and test subfolders).
+* Call train.py to start training Yolov4-tiny with Yolov4
 * Hyperparameters are defined in params.json files.
-
-
-## Train (Dataset: ImageNet)
-
-Note: all the hyperparameters can be found and modified in 'params.json' under 'model_dir'
-
-- Train a ResNet18 model with knowledge distilled from a pre-trained Densenet teacher
-```
-python3 train.py --model_dir experiments/resnet18_distill/densenet161_teacher
-```
 
 
 ## References
